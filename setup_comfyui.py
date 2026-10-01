@@ -197,6 +197,28 @@ def install_isolated_conda():
         print(f"Creating isolated conda environment: {CONDA_ENV_NAME} (Python 3.10) ...")
         run_cmd(f"{conda_bin} create -y -n {CONDA_ENV_NAME} python=3.10")
 
+def patch_comfy_kitchen():
+    """Fix PyTorch infer_schema compatibility bug with list[int] in comfy-kitchen."""
+    print("Checking and patching comfy-kitchen for PyTorch infer_schema compatibility...")
+    env_pip = MINICONDA_DIR / "envs" / CONDA_ENV_NAME / "bin" / "pip"
+    run_cmd(f"{env_pip} install -U --no-deps comfy-kitchen", check=False)
+
+    site_packages = MINICONDA_DIR / "envs" / CONDA_ENV_NAME / "lib" / "python3.10" / "site-packages"
+    kitchen_dir = site_packages / "comfy_kitchen"
+    if kitchen_dir.exists():
+        for py_file in kitchen_dir.glob("**/*.py"):
+            try:
+                text = py_file.read_text(encoding="utf-8")
+                if "list[int]" in text or "list[bool]" in text or "list[float]" in text:
+                    patched = "import typing\n" + text
+                    patched = patched.replace("list[int]", "typing.List[int]")
+                    patched = patched.replace("list[bool]", "typing.List[bool]")
+                    patched = patched.replace("list[float]", "typing.List[float]")
+                    py_file.write_text(patched, encoding="utf-8")
+                    print(f"  [PATCHED] {py_file.name}")
+            except Exception as e:
+                print(f"  [WARN] Failed to patch {py_file.name}: {e}")
+
 def install_packages_with_retry(cuda_version):
     """Install PyTorch, xformers, and ComfyUI with autonomous error resolution."""
     print("\n=== [5/6] Library Installation & Dependencies ===")
@@ -243,6 +265,9 @@ def install_packages_with_retry(cuda_version):
     # Install additional common utilities for headless/API operation
     print("Installing API utilities (aiohttp, websocket-client, requests)...")
     run_cmd(f"{env_pip} install aiohttp websocket-client requests pillow")
+
+    # Autonomous Fix: Patch comfy-kitchen for PyTorch infer_schema compatibility (list[int] -> typing.List[int])
+    patch_comfy_kitchen()
 
     # Link extra_model_paths.yaml into ComfyUI
     config_target = COMFYUI_DIR / "extra_model_paths.yaml"
@@ -294,6 +319,8 @@ def main(force_rebuild=False):
         install_isolated_conda()
         install_packages_with_retry(cuda_version)
         save_cache()
+    else:
+        patch_comfy_kitchen()
 
     # Re-verify symlink to Drive extra_model_paths.yaml
     config_target = COMFYUI_DIR / "extra_model_paths.yaml"
