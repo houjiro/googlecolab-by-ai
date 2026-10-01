@@ -1,0 +1,421 @@
+"""
+ComfyUI Master Pipeline Tools for Google Colab Pro
+Phase 2 & 3: Token Management and Autonomous API Wrappers
+"""
+
+import os
+import sys
+import json
+import time
+import uuid
+import urllib.request
+import urllib.parse
+import subprocess
+from pathlib import Path
+from typing import Dict, Any, Optional, List
+
+# Colab / IPython Display
+try:
+    from IPython.display import Image as IPImage, display, HTML, clear_output
+except ImportError:
+    IPImage = None
+    display = print
+
+# Base Directories
+TARGET_DRIVE_FOLDER_ID = "1CVwjVWJAR7PDiFbs4IPCoKzE3KYzDk2n"
+DRIVE_MOUNT_POINT = Path("/content/drive")
+LOCAL_COMFY_DIR = Path("/content/ComfyUI")
+CONDA_PYTHON = Path("/content/miniconda/envs/comfy_env/bin/python")
+CONDA_PIP = Path("/content/miniconda/envs/comfy_env/bin/pip")
+COMFY_API_URL = "http://127.0.0.1:8188"
+
+def resolve_target_drive_dir() -> Path:
+    """Resolve target directory from Google Drive."""
+    my_drive = DRIVE_MOUNT_POINT / "MyDrive"
+    if not my_drive.exists():
+        return my_drive / "ComfyUI_Master"
+
+    try:
+        from setup_comfyui import resolve_target_drive_dir as resolver
+        return resolver()
+    except Exception:
+        pass
+
+    for item in my_drive.iterdir():
+        if item.is_dir() and "comfy" in item.name.lower():
+            return item
+    return my_drive / "ComfyUI_Master"
+
+DRIVE_MASTER_DIR = resolve_target_drive_dir()
+TOKENS_CONFIG_PATH = DRIVE_MASTER_DIR / "config" / "tokens.json"
+
+# =====================================================================
+# Phase 2: Token & Credential Management
+# =====================================================================
+
+def get_token(key: str = "hf_token") -> Optional[str]:
+    """
+    Retrieve token securely from Drive config/tokens.json or environment.
+    Strictly avoids hardcoded tokens.
+    """
+    # 1. Check Drive tokens.json
+    if TOKENS_CONFIG_PATH.exists():
+        try:
+            with open(TOKENS_CONFIG_PATH, "r", encoding="utf-8") as f:
+                tokens = json.load(f)
+                token = tokens.get(key)
+                if token and token.strip() and not token.startswith("PASTE_YOUR_"):
+                    return token.strip()
+        except Exception as e:
+            print(f"[WARN] Failed to read {TOKENS_CONFIG_PATH}: {e}")
+
+    # 2. Check Colab Secrets / Environment variables
+    env_token = os.environ.get(key.upper()) or os.environ.get(key)
+    if env_token and env_token.strip():
+        return env_token.strip()
+
+    return None
+
+def require_hf_token() -> str:
+    """
+    Ensure Hugging Face token is present.
+    If missing, prompts the user to provide it and creates a template in Drive.
+    """
+    token = get_token("hf_token")
+    if token:
+        return token
+
+    # Guide user to set token
+    TOKENS_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not TOKENS_CONFIG_PATH.exists():
+        sample_json = {
+            "hf_token": "PASTE_YOUR_HUGGINGFACE_TOKEN_HERE",
+            "civitai_api_key": ""
+        }
+        with open(TOKENS_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(sample_json, f, indent=4)
+
+    err_msg = (
+        f"\n[AUTHENTICATION REQUIRED]\n"
+        f"Hugging Face token is required for this operation.\n"
+        f"Please write your token into:\n"
+        f"  '{TOKENS_CONFIG_PATH}'\n"
+        f"Format: {{\"hf_token\": \"hf_xxxxxxxxxxxx\"}}\n"
+        f"Or set the HF_TOKEN environment variable.\n"
+    )
+    print(err_msg)
+    raise PermissionError("Missing Hugging Face token. Please configure tokens.json on Google Drive.")
+
+# =====================================================================
+# Phase 3: Autonomous API Wrapper Functions
+# =====================================================================
+
+def run_pip(args_str: str):
+    """Run pip inside the isolated conda environment."""
+    cmd = f"{CONDA_PIP} {args_str}"
+    print(f"[PIP] {cmd}")
+    subprocess.run(cmd, shell=True, check=True)
+
+def install_model(url_or_hf_id: str, target_dir: Optional[str] = None, filename: Optional[str] = None) -> Path:
+    """
+    1. install_model(url_or_hf_id, target_dir):
+    Downloads model checkpoints, LoRAs, or VAEs into Google Drive storage.
+    Supports direct URLs, Hugging Face repos/files, with aria2c acceleration and token auth.
+    """
+    # Auto-detect target directory if not specified
+    if not target_dir:
+        lower_src = url_or_hf_id.lower()
+        if "lora" in lower_src:
+            target_dir = "models/loras"
+        elif "vae" in lower_src:
+            target_dir = "models/vae"
+        elif "controlnet" in lower_src:
+            target_dir = "models/controlnet"
+        else:
+            target_dir = "models/checkpoints"
+
+    dest_dir = DRIVE_MASTER_DIR / target_dir
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine filename
+    if not filename:
+        if "/" in url_or_hf_id:
+            filename = url_or_hf_id.split("/")[-1].split("?")[0]
+        else:
+            filename = f"{url_or_hf_id}.safetensors"
+
+    dest_file = dest_dir / filename
+    if dest_file.exists() and dest_file.stat().st_size > 1024 * 1024:
+        print(f"[SKIP] Model already exists: {dest_file} ({dest_file.stat().st_size / (1024*1024):.1f} MB)")
+        return dest_file
+
+    print(f"\n[DOWNLOAD] Target: {dest_file}")
+    print(f"Source: {url_or_hf_id}")
+
+    # Case A: Hugging Face ID (e.g., username/repo or huggingface.co URL)
+    is_hf = "huggingface.co" in url_or_hf_id or (url_or_hf_id.count("/") == 1 and not url_or_hf_id.startswith("http"))
+    headers = []
+    hf_token = get_token("hf_token")
+    if is_hf and hf_token:
+        headers.append(f"Authorization: Bearer {hf_token}")
+
+    # If it is an HF repo identifier (e.g. runwayml/stable-diffusion-v1-5 and single file)
+    download_url = url_or_hf_id
+    if is_hf and not url_or_hf_id.startswith("http"):
+        # Default to huggingface resolve URL if a specific safetensors file is provided
+        if filename.endswith(".safetensors") or filename.endswith(".ckpt"):
+            download_url = f"https://huggingface.co/{url_or_hf_id}/resolve/main/{filename}"
+        else:
+            # Fallback to downloading entire repo via huggingface_hub in conda env
+            print("Downloading from Hugging Face Hub using isolated env...")
+            script = f"""
+from huggingface_hub import snapshot_download
+snapshot_download(repo_id='{url_or_hf_id}', local_dir='{dest_dir}', token='{hf_token or ""}')
+"""
+            subprocess.run([str(CONDA_PYTHON), "-c", script], check=True)
+            return dest_dir
+
+    # Use aria2c for maximum download throughput on Colab
+    subprocess.run("command -v aria2c >/dev/null 2>&1 || sudo apt-get install -y -qq aria2c", shell=True, check=False)
+    header_args = " ".join([f'--header="{h}"' for h in headers])
+    aria_cmd = (
+        f"aria2c -c -x 16 -s 16 -k 1M {header_args} "
+        f"-d '{dest_dir}' -o '{filename}' '{download_url}'"
+    )
+
+    ret = subprocess.run(aria_cmd, shell=True)
+    if ret.returncode != 0 or not dest_file.exists() or dest_file.stat().st_size == 0:
+        print("[WARN] aria2c download failed or file empty. Falling back to curl...")
+        curl_headers = " ".join([f'-H "{h}"' for h in headers])
+        curl_cmd = f"curl -L -C - {curl_headers} -o '{dest_file}' '{download_url}'"
+        subprocess.run(curl_cmd, shell=True, check=True)
+
+    print(f"[SUCCESS] Model saved to {dest_file} ({dest_file.stat().st_size / (1024*1024):.1f} MB)")
+    return dest_file
+
+def install_custom_node(git_url: str) -> Path:
+    """
+    2. install_custom_node(git_url):
+    Clones custom node repository into ComfyUI/custom_nodes and installs dependencies into isolated env.
+    """
+    custom_nodes_dir = LOCAL_COMFY_DIR / "custom_nodes"
+    custom_nodes_dir.mkdir(parents=True, exist_ok=True)
+
+    repo_name = git_url.rstrip("/").split("/")[-1].replace(".git", "")
+    target_repo_dir = custom_nodes_dir / repo_name
+
+    if target_repo_dir.exists():
+        print(f"[UPDATE] Custom node already exists at {target_repo_dir}. Pulling latest...")
+        subprocess.run(f"git -C '{target_repo_dir}' pull", shell=True, check=False)
+    else:
+        print(f"[CLONE] Installing custom node from {git_url} ...")
+        subprocess.run(f"git clone '{git_url}' '{target_repo_dir}'", shell=True, check=True)
+
+    # Check and install requirements.txt
+    req_file = target_repo_dir / "requirements.txt"
+    if req_file.exists():
+        print(f"Installing dependencies for {repo_name}...")
+        run_pip(f"install -r '{req_file}'")
+
+    print(f"[SUCCESS] Custom node installed: {repo_name}")
+    print("[NOTE] If ComfyUI is already running, a restart may be required for nodes to load.")
+    return target_repo_dir
+
+def generate_media(prompt_json: Dict[str, Any], api_url: str = COMFY_API_URL, timeout_sec: int = 600) -> List[Path]:
+    """
+    3. generate_media(prompt_json):
+    Submits a prompt workflow JSON to ComfyUI API (http://127.0.0.1:8188) and tracks completion.
+    Returns list of paths to generated outputs.
+    """
+    client_id = str(uuid.uuid4())
+    payload = json.dumps({"prompt": prompt_json, "client_id": client_id}).encode("utf-8")
+
+    # Submit prompt
+    req = urllib.request.Request(
+        f"{api_url}/prompt",
+        data=payload,
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            resp_data = json.loads(resp.read().decode("utf-8"))
+            prompt_id = resp_data.get("prompt_id")
+    except urllib.error.URLError as e:
+        raise ConnectionError(f"Failed to connect to ComfyUI API at {api_url}. Is server running? Error: {e}")
+
+    print(f"[QUEUED] Job submitted. Prompt ID: {prompt_id}")
+
+    # Track job execution via polling /history
+    start_time = time.time()
+    last_node = ""
+    while time.time() - start_time < timeout_sec:
+        time.sleep(1.0)
+        try:
+            with urllib.request.urlopen(f"{api_url}/history/{prompt_id}") as resp:
+                history_data = json.loads(resp.read().decode("utf-8"))
+                if prompt_id in history_data:
+                    prompt_history = history_data[prompt_id]
+                    # Check status
+                    status = prompt_history.get("status", {})
+                    if status.get("status_str") == "error":
+                        raise RuntimeError(f"ComfyUI execution error: {status.get('messages')}")
+
+                    # Collect output images
+                    outputs = prompt_history.get("outputs", {})
+                    output_files: List[Path] = []
+                    for node_id, node_output in outputs.items():
+                        images = node_output.get("images", [])
+                        for img in images:
+                            fname = img.get("filename")
+                            subfolder = img.get("subfolder", "")
+                            # Check in Drive outputs dir first, then ComfyUI/output
+                            drive_out = DRIVE_MASTER_DIR / "outputs" / subfolder / fname
+                            local_out = LOCAL_COMFY_DIR / "output" / subfolder / fname
+                            if drive_out.exists():
+                                output_files.append(drive_out)
+                            elif local_out.exists():
+                                output_files.append(local_out)
+                            else:
+                                output_files.append(drive_out) # Target expected path
+
+                    elapsed = time.time() - start_time
+                    print(f"\n[DONE] Generation finished in {elapsed:.1f}s. Produced {len(output_files)} file(s).")
+                    return output_files
+        except Exception as e:
+            if "ComfyUI execution error" in str(e):
+                raise
+            # Continue polling if history not ready yet
+            pass
+
+    raise TimeoutError(f"Generation timed out after {timeout_sec} seconds.")
+
+def preview_image(image_path: Path):
+    """
+    4. preview_image(image_path):
+    Displays image or video directly in the notebook output using IPython.display.
+    Does not use ngrok or external tunnels.
+    """
+    path = Path(image_path)
+    if not path.exists():
+        print(f"[ERROR] File does not exist for preview: {path}")
+        return
+
+    ext = path.suffix.lower()
+    print(f"\n[PREVIEW] Displaying: {path.name}")
+    if ext in [".png", ".jpg", ".jpeg", ".webp"]:
+        if IPImage:
+            display(IPImage(filename=str(path)))
+        else:
+            print(f"[INFO] Image saved at {path}")
+    elif ext in [".mp4", ".webm"]:
+        video_html = f"""
+        <video width="640" height="480" controls autoplay loop>
+            <source src="file://{path.resolve()}" type="video/mp4">
+            Your browser does not support the video tag.
+        </video>
+        """
+        display(HTML(video_html))
+    else:
+        print(f"[INFO] File generated at: {path}")
+
+# =====================================================================
+# Standard Workflow Helper (Phase 4 Base)
+# =====================================================================
+
+def create_default_txt2img_workflow(
+    ckpt_name: str,
+    positive_prompt: str,
+    negative_prompt: str = "ugly, blurry, low quality, artifacts, watermark",
+    width: int = 512,
+    height: int = 512,
+    steps: int = 20,
+    cfg: float = 7.0,
+    seed: Optional[int] = None
+) -> Dict[str, Any]:
+    """Generates standard ComfyUI API prompt JSON for text-to-image (SD 1.5)."""
+    if seed is None:
+        seed = int(time.time() * 1000) % 10000000000
+
+    workflow = {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "cfg": cfg,
+                "denoise": 1,
+                "latent_image": ["5", 0],
+                "model": ["4", 0],
+                "negative": ["7", 0],
+                "positive": ["6", 0],
+                "sampler_name": "euler_ancestral",
+                "scheduler": "normal",
+                "seed": seed,
+                "steps": steps
+            }
+        },
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {
+                "ckpt_name": ckpt_name
+            }
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {
+                "batch_size": 1,
+                "height": height,
+                "width": width
+            }
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+                "clip": ["4", 1],
+                "text": positive_prompt
+            }
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+                "clip": ["4", 1],
+                "text": negative_prompt
+            }
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {
+                "samples": ["3", 0],
+                "vae": ["4", 2]
+            }
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {
+                "filename_prefix": "ComfyUI_Master",
+                "images": ["8", 0]
+            }
+        }
+    }
+    return workflow
+
+def create_sdxl_txt2img_workflow(
+    ckpt_name: str,
+    positive_prompt: str,
+    negative_prompt: str = "ugly, blurry, low quality, artifacts, distorted, bad anatomy, watermark",
+    width: int = 1024,
+    height: int = 1024,
+    steps: int = 30,
+    cfg: float = 7.0,
+    seed: Optional[int] = None
+) -> Dict[str, Any]:
+    """Generates standard ComfyUI API prompt JSON optimized for SDXL (1024x1024)."""
+    return create_default_txt2img_workflow(
+        ckpt_name=ckpt_name,
+        positive_prompt=positive_prompt,
+        negative_prompt=negative_prompt,
+        width=width,
+        height=height,
+        steps=steps,
+        cfg=cfg,
+        seed=seed
+    )
+
