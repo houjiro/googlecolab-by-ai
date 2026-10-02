@@ -641,14 +641,16 @@ def run_generation_panel(
     negative_prompt: str,
     aspect_ratio_str: str,
     batch_count: int = 1,
+    concurrent_batch_size: int = 1,
     apply_lora: bool = False,
     lora_file: str = "",
     lora_strength: float = 0.85,
+    upscale_2x: bool = False,
     steps: int = 25,
     guidance_or_cfg: float = 3.5,
     seed: int = -1
 ):
-    """Unified runner for Colab Form UI inputs."""
+    """Unified runner for Colab Form UI inputs with 2x Upscaling and Batch controls."""
     # Parse Resolution
     res_map = {
         "16:9 (1344x768)": (1344, 768),
@@ -667,9 +669,24 @@ def run_generation_panel(
             lora_name = f"{lora_name}.safetensors"
         active_lora = lora_name
 
+    # Handle Upscaler Model check
+    upscaler_file = "4x-UltraSharp.pth"
+    if upscale_2x:
+        upscale_dir = DRIVE_MASTER_DIR / "models" / "upscale_models"
+        upscale_dir.mkdir(parents=True, exist_ok=True)
+        target_pth = upscale_dir / upscaler_file
+        if not target_pth.exists() or target_pth.stat().st_size < 1024 * 1024:
+            print("Downloading 4x-UltraSharp upscaler model (~67MB)...")
+            upscale_url = "https://huggingface.co/lokCX/4x-Ultrasharp/resolve/main/4x-UltraSharp.pth"
+            try:
+                install_model(upscale_url, target_dir="models/upscale_models", filename=upscaler_file)
+            except Exception as e:
+                print(f"[WARN] Failed to download upscaler: {e}")
+
     is_flux = "FLUX" in engine.upper()
     print(f"\n=======================================================")
-    print(f" 🎨 生成開始: 【{engine}】 | 解像度: {width}x{height} | {batch_count} 枚")
+    print(f" 🎨 生成開始: 【{engine}】 | 解像度: {width}x{height} (2x拡大: {'ON (2688x1536)' if upscale_2x else 'OFF'})")
+    print(f" 🔢 生成枚数: {batch_count} 枚 (同時バッチ: {concurrent_batch_size})")
     if active_lora:
         print(f" 🎀 適用LoRA: {active_lora} (強度: {lora_strength})")
     print(f"=======================================================")
@@ -687,8 +704,24 @@ def run_generation_panel(
                 height=height,
                 steps=steps,
                 guidance=guidance_or_cfg,
+                batch_size=concurrent_batch_size,
                 seed=cur_seed
             )
+            # Inject 2x Upscale nodes to FLUX workflow
+            if upscale_2x:
+                wf["20"] = {
+                    "class_type": "UpscaleModelLoader",
+                    "inputs": {"model_name": upscaler_file}
+                }
+                wf["21"] = {
+                    "class_type": "ImageUpscaleWithModel",
+                    "inputs": {"upscale_model": ["20", 0], "image": ["9", 0]}
+                }
+                wf["22"] = {
+                    "class_type": "ImageScaleBy",
+                    "inputs": {"image": ["21", 0], "upscale_method": "bicubic", "scale_by": 0.5}
+                }
+                wf["11"]["inputs"]["images"] = ["22", 0]
         else:
             if active_lora:
                 wf = create_sdxl_lora_workflow(
@@ -701,6 +734,7 @@ def run_generation_panel(
                     height=height,
                     steps=steps,
                     cfg=guidance_or_cfg,
+                    batch_size=concurrent_batch_size,
                     seed=cur_seed
                 )
             else:
@@ -714,9 +748,26 @@ def run_generation_panel(
                     cfg=guidance_or_cfg,
                     seed=cur_seed
                 )
+                wf["5"]["inputs"]["batch_size"] = concurrent_batch_size
+            
+            # Inject 2x Upscale nodes to SDXL workflow
+            if upscale_2x:
+                wf["20"] = {
+                    "class_type": "UpscaleModelLoader",
+                    "inputs": {"model_name": upscaler_file}
+                }
+                wf["21"] = {
+                    "class_type": "ImageUpscaleWithModel",
+                    "inputs": {"upscale_model": ["20", 0], "image": ["8", 0]}
+                }
+                wf["22"] = {
+                    "class_type": "ImageScaleBy",
+                    "inputs": {"image": ["21", 0], "upscale_method": "bicubic", "scale_by": 0.5}
+                }
+                wf["9"]["inputs"]["images"] = ["22", 0]
         
         outputs = generate_media(wf)
         for img in outputs:
             preview_image(img)
     
-    print("\n🎉 すべての生成が完了しました！")
+    print("\n🎉 すべての生成・処理が完了しました！")

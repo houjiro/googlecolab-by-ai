@@ -73,6 +73,7 @@ def get_required_drive_dirs(base_dir: Path):
         base_dir / "models" / "clip",
         base_dir / "models" / "unet",
         base_dir / "models" / "diffusion_models",
+        base_dir / "models" / "upscale_models",
         base_dir / "outputs",
         base_dir / "workflows",
         base_dir / "config",
@@ -155,10 +156,11 @@ def setup_google_drive():
     clip: models/clip
     unet: models/unet
     diffusion_models: models/diffusion_models
+    upscale_models: models/upscale_models
 """
-    if not config_yaml_path.exists() or "diffusion_models" not in config_yaml_path.read_text():
+    if not config_yaml_path.exists() or "upscale_models" not in config_yaml_path.read_text():
         config_yaml_path.write_text(yaml_content)
-        print(f"  [OK] Updated extra_model_paths.yaml with FLUX paths at {config_yaml_path}")
+        print(f"  [OK] Updated extra_model_paths.yaml with upscale_models at {config_yaml_path}")
 
 def restore_cache():
     """Check and unpack pre-built environment cache from Drive."""
