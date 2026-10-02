@@ -635,5 +635,88 @@ def create_flux_workflow(
 
     return workflow
 
+def run_generation_panel(
+    engine: str,
+    prompt: str,
+    negative_prompt: str,
+    aspect_ratio_str: str,
+    batch_count: int = 1,
+    apply_lora: bool = False,
+    lora_file: str = "",
+    lora_strength: float = 0.85,
+    steps: int = 25,
+    guidance_or_cfg: float = 3.5,
+    seed: int = -1
+):
+    """Unified runner for Colab Form UI inputs."""
+    # Parse Resolution
+    res_map = {
+        "16:9 (1344x768)": (1344, 768),
+        "1:1 (1024x1024)": (1024, 1024),
+        "9:16 (768x1344)": (768, 1344),
+        "4:3 (1152x864)": (1152, 864),
+        "3:4 (864x1152)": (864, 1152),
+    }
+    width, height = res_map.get(aspect_ratio_str, (1024, 1024))
+    
+    # Resolve LoRA
+    active_lora = None
+    if apply_lora and lora_file.strip():
+        lora_name = lora_file.strip()
+        if not lora_name.endswith(".safetensors"):
+            lora_name = f"{lora_name}.safetensors"
+        active_lora = lora_name
 
+    is_flux = "FLUX" in engine.upper()
+    print(f"\n=======================================================")
+    print(f" 🎨 生成開始: 【{engine}】 | 解像度: {width}x{height} | {batch_count} 枚")
+    if active_lora:
+        print(f" 🎀 適用LoRA: {active_lora} (強度: {lora_strength})")
+    print(f"=======================================================")
 
+    for i in range(1, batch_count + 1):
+        cur_seed = int(time.time() * 1000 + i * 9973) % 10000000000 if seed == -1 else (seed + i - 1)
+        print(f"\n▶ [{i}/{batch_count} 枚目] 生成中 (Seed: {cur_seed})...")
+        
+        if is_flux:
+            wf = create_flux_workflow(
+                positive_prompt=prompt,
+                lora_name=active_lora,
+                lora_strength=lora_strength,
+                width=width,
+                height=height,
+                steps=steps,
+                guidance=guidance_or_cfg,
+                seed=cur_seed
+            )
+        else:
+            if active_lora:
+                wf = create_sdxl_lora_workflow(
+                    ckpt_name="sd_xl_base_1.0.safetensors",
+                    lora_name=active_lora,
+                    positive_prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    lora_strength=lora_strength,
+                    width=width,
+                    height=height,
+                    steps=steps,
+                    cfg=guidance_or_cfg,
+                    seed=cur_seed
+                )
+            else:
+                wf = create_sdxl_txt2img_workflow(
+                    ckpt_name="sd_xl_base_1.0.safetensors",
+                    positive_prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    width=width,
+                    height=height,
+                    steps=steps,
+                    cfg=guidance_or_cfg,
+                    seed=cur_seed
+                )
+        
+        outputs = generate_media(wf)
+        for img in outputs:
+            preview_image(img)
+    
+    print("\n🎉 すべての生成が完了しました！")
