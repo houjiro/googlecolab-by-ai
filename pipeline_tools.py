@@ -510,4 +510,130 @@ def create_sdxl_lora_workflow(
     }
     return workflow
 
+def create_flux_workflow(
+    positive_prompt: str,
+    lora_name: Optional[str] = None,
+    lora_strength: float = 0.85,
+    unet_name: str = "flux1-dev-fp8.safetensors",
+    clip_name1: str = "t5xxl_fp8_e4m3fn.safetensors",
+    clip_name2: str = "clip_l.safetensors",
+    vae_name: str = "ae.safetensors",
+    width: int = 1344,
+    height: int = 768,
+    steps: int = 25,
+    guidance: float = 3.5,
+    batch_size: int = 1,
+    seed: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Generates ComfyUI API prompt JSON for FLUX.1 [dev] with optional LoRA support.
+    Defaults to 16:9 (1344x768).
+    """
+    if seed is None:
+        seed = int(time.time() * 1000) % 10000000000
+
+    workflow = {
+        "1": {
+            "class_type": "UNETLoader",
+            "inputs": {
+                "unet_name": unet_name,
+                "weight_dtype": "default"
+            }
+        },
+        "2": {
+            "class_type": "DualCLIPLoader",
+            "inputs": {
+                "clip_name1": clip_name1,
+                "clip_name2": clip_name2,
+                "type": "flux"
+            }
+        },
+        "3": {
+            "class_type": "VAELoader",
+            "inputs": {
+                "vae_name": vae_name
+            }
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {
+                "batch_size": batch_size,
+                "height": height,
+                "width": width
+            }
+        }
+    }
+
+    # Handle LoRA injection if specified
+    model_source = ["1", 0]
+    clip_source = ["2", 0]
+
+    if lora_name:
+        if not lora_name.endswith(".safetensors"):
+            lora_name = f"{lora_name}.safetensors"
+        workflow["10"] = {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": lora_name,
+                "strength_model": lora_strength,
+                "strength_clip": lora_strength,
+                "model": model_source,
+                "clip": clip_source
+            }
+        }
+        model_source = ["10", 0]
+        clip_source = ["10", 1]
+
+    # Conditioning (Text Encode + Flux Guidance)
+    workflow["6"] = {
+        "class_type": "CLIPTextEncode",
+        "inputs": {
+            "clip": clip_source,
+            "text": positive_prompt
+        }
+    }
+    workflow["7"] = {
+        "class_type": "FluxGuidance",
+        "inputs": {
+            "guidance": guidance,
+            "conditioning": ["6", 0]
+        }
+    }
+
+    # KSampler (FLUX uses cfg=1.0 and Euler / Simple)
+    workflow["8"] = {
+        "class_type": "KSampler",
+        "inputs": {
+            "cfg": 1.0,
+            "denoise": 1.0,
+            "latent_image": ["5", 0],
+            "model": model_source,
+            "positive": ["7", 0],
+            "negative": ["6", 0],
+            "sampler_name": "euler",
+            "scheduler": "simple",
+            "seed": seed,
+            "steps": steps
+        }
+    }
+
+    # Decode and Save
+    workflow["9"] = {
+        "class_type": "VAEDecode",
+        "inputs": {
+            "samples": ["8", 0],
+            "vae": ["3", 0]
+        }
+    }
+    workflow["11"] = {
+        "class_type": "SaveImage",
+        "inputs": {
+            "filename_prefix": "FLUX_Master",
+            "images": ["9", 0]
+        }
+    }
+
+    return workflow
+
+
 

@@ -71,6 +71,8 @@ def get_required_drive_dirs(base_dir: Path):
         base_dir / "models" / "controlnet",
         base_dir / "models" / "embeddings",
         base_dir / "models" / "clip",
+        base_dir / "models" / "unet",
+        base_dir / "models" / "diffusion_models",
         base_dir / "outputs",
         base_dir / "workflows",
         base_dir / "config",
@@ -141,10 +143,9 @@ def setup_google_drive():
         directory.mkdir(parents=True, exist_ok=True)
         print(f"  [OK] Directory ready: {directory}")
 
-    # Generate extra_model_paths.yaml if not present
+    # Generate extra_model_paths.yaml if not present or update it
     config_yaml_path = DRIVE_MASTER_DIR / "config" / "extra_model_paths.yaml"
-    if not config_yaml_path.exists():
-        yaml_content = f"""comfyui:
+    yaml_content = f"""comfyui:
     base_path: {DRIVE_MASTER_DIR}
     checkpoints: models/checkpoints
     loras: models/loras
@@ -152,9 +153,12 @@ def setup_google_drive():
     controlnet: models/controlnet
     embeddings: models/embeddings
     clip: models/clip
+    unet: models/unet
+    diffusion_models: models/diffusion_models
 """
+    if not config_yaml_path.exists() or "diffusion_models" not in config_yaml_path.read_text():
         config_yaml_path.write_text(yaml_content)
-        print(f"  [OK] Created default extra_model_paths.yaml at {config_yaml_path}")
+        print(f"  [OK] Updated extra_model_paths.yaml with FLUX paths at {config_yaml_path}")
 
 def restore_cache():
     """Check and unpack pre-built environment cache from Drive."""
