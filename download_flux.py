@@ -38,8 +38,8 @@ def download_flux_models():
         filename="t5xxl_fp8_e4m3fn.safetensors"
     )
 
-    # 4. FLUX VAE (~335MB)
-    vae_url = "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/ae.safetensors"
+    # 4. FLUX VAE (~335MB) - Use public schnell repo (identical binary, no token required)
+    vae_url = "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/ae.safetensors"
     print("\n[4/4] FLUX VAE (~335MB)...")
     install_model(
         url_or_hf_id=vae_url,
