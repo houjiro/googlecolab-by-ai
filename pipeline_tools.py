@@ -419,3 +419,95 @@ def create_sdxl_txt2img_workflow(
         seed=seed
     )
 
+def create_sdxl_lora_workflow(
+    ckpt_name: str,
+    lora_name: str,
+    positive_prompt: str,
+    negative_prompt: str = "ugly, blurry, low quality, artifacts, distorted, bad anatomy, watermark",
+    lora_strength: float = 0.85,
+    width: int = 1344,
+    height: int = 768,
+    steps: int = 30,
+    cfg: float = 7.0,
+    batch_size: int = 1,
+    seed: Optional[int] = None
+) -> Dict[str, Any]:
+    """Generates ComfyUI API prompt JSON for SDXL with LoRA support (defaults to 16:9)."""
+    if seed is None:
+        seed = int(time.time() * 1000) % 10000000000
+
+    if not lora_name.endswith(".safetensors"):
+        lora_name = f"{lora_name}.safetensors"
+
+    workflow = {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "cfg": cfg,
+                "denoise": 1.0,
+                "latent_image": ["5", 0],
+                "model": ["10", 0],
+                "negative": ["7", 0],
+                "positive": ["6", 0],
+                "sampler_name": "euler_ancestral",
+                "scheduler": "normal",
+                "seed": seed,
+                "steps": steps
+            }
+        },
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {
+                "ckpt_name": ckpt_name
+            }
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {
+                "batch_size": batch_size,
+                "height": height,
+                "width": width
+            }
+        },
+        "10": {
+            "class_type": "LoraLoader",
+            "inputs": {
+                "lora_name": lora_name,
+                "strength_model": lora_strength,
+                "strength_clip": lora_strength,
+                "model": ["4", 0],
+                "clip": ["4", 1]
+            }
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+                "clip": ["10", 1],
+                "text": positive_prompt
+            }
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {
+                "clip": ["10", 1],
+                "text": negative_prompt
+            }
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {
+                "samples": ["3", 0],
+                "vae": ["4", 2]
+            }
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {
+                "filename_prefix": "ComfyUI_Master",
+                "images": ["8", 0]
+            }
+        }
+    }
+    return workflow
+
+
