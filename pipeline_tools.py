@@ -698,6 +698,7 @@ def run_generation_panel(
     prompt: str,
     negative_prompt: str,
     aspect_ratio_str: str,
+    checkpoint: str = "sd_xl_base_1.0.safetensors",
     batch_count: int = 1,
     concurrent_batch_size: int = 1,
     apply_lora: bool = False,
@@ -721,6 +722,11 @@ def run_generation_panel(
     }
     width, height = res_map.get(aspect_ratio_str, (1024, 1024))
     
+    # Resolve Checkpoint (for SDXL)
+    active_ckpt = checkpoint.strip() if checkpoint else "sd_xl_base_1.0.safetensors"
+    if not active_ckpt.endswith(".safetensors") and not active_ckpt.endswith(".ckpt"):
+        active_ckpt = f"{active_ckpt}.safetensors"
+
     # Resolve LoRA (support single or comma-separated multi-LoRA)
     active_lora = None
     if apply_lora and lora_file.strip():
@@ -743,6 +749,8 @@ def run_generation_panel(
     is_flux = "FLUX" in engine.upper()
     print(f"\n=======================================================")
     print(f" 🎨 生成開始: 【{engine}】 | 解像度: {width}x{height} (2x拡大: {'ON (2688x1536)' if upscale_2x else 'OFF'})")
+    if not is_flux:
+        print(f" 📦 Checkpoint: {active_ckpt}")
     print(f" 🔢 生成枚数: {batch_count} 枚 (同時バッチ: {concurrent_batch_size})")
     print(f" ⚙️ Sampler: {sampler_name} | Scheduler: {scheduler} | Steps: {steps}")
     if active_lora:
@@ -787,7 +795,7 @@ def run_generation_panel(
         else:
             if active_lora:
                 wf = create_sdxl_lora_workflow(
-                    ckpt_name="sd_xl_base_1.0.safetensors",
+                    ckpt_name=active_ckpt,
                     lora_name=active_lora,
                     positive_prompt=prompt,
                     negative_prompt=negative_prompt,
@@ -803,7 +811,7 @@ def run_generation_panel(
                 )
             else:
                 wf = create_sdxl_txt2img_workflow(
-                    ckpt_name="sd_xl_base_1.0.safetensors",
+                    ckpt_name=active_ckpt,
                     positive_prompt=prompt,
                     negative_prompt=negative_prompt,
                     width=width,
@@ -837,3 +845,192 @@ def run_generation_panel(
             preview_image(img)
     
     print("\n🎉 すべての生成・処理が完了しました！")
+
+def launch_generation_ui():
+    """
+    Renders an interactive WebUI-like control panel inside Google Colab using ipywidgets.
+    Features a genuine multi-line textarea at the bottom for long prompts, Checkpoint selector, and instant generation.
+    """
+    try:
+        import ipywidgets as widgets
+        from IPython.display import display
+    except ImportError:
+        print("[ERROR] ipywidgets is not installed in this environment.")
+        return
+
+    # 1. Discover Checkpoints from Drive
+    ckpt_dir = DRIVE_MASTER_DIR / "models" / "checkpoints"
+    found_ckpts = []
+    if ckpt_dir.exists():
+        found_ckpts = [f.name for f in ckpt_dir.glob("*.safetensors")] + [f.name for f in ckpt_dir.glob("*.ckpt")]
+    if not found_ckpts:
+        found_ckpts = ["sd_xl_base_1.0.safetensors"]
+
+    # 2. Form Widgets
+    engine_w = widgets.Dropdown(
+        options=["FLUX.1 [dev]", "SDXL Base 1.0"],
+        value="FLUX.1 [dev]",
+        description="Engine:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='48%')
+    )
+    ckpt_w = widgets.Dropdown(
+        options=found_ckpts,
+        value=found_ckpts[0],
+        description="Checkpoint:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='48%')
+    )
+    aspect_w = widgets.Dropdown(
+        options=["16:9 (1344x768)", "1:1 (1024x1024)", "9:16 (768x1344)", "4:3 (1152x864)", "3:4 (864x1152)"],
+        value="16:9 (1344x768)",
+        description="Aspect Ratio:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='48%')
+    )
+    sampler_w = widgets.Dropdown(
+        options=["euler", "euler_ancestral", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "dpmpp_3m_sde", "ddim", "uni_pc"],
+        value="euler",
+        description="Sampler:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='48%')
+    )
+    scheduler_w = widgets.Dropdown(
+        options=["simple", "normal", "karras", "sgm_uniform", "beta", "exponential"],
+        value="simple",
+        description="Scheduler:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='48%')
+    )
+    total_count_w = widgets.IntSlider(
+        value=1, min=1, max=16, step=1,
+        description="Total Count:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='48%')
+    )
+    concurrent_w = widgets.IntSlider(
+        value=1, min=1, max=8, step=1,
+        description="Concurrent Batch:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='48%')
+    )
+    steps_w = widgets.IntSlider(
+        value=25, min=15, max=50, step=1,
+        description="Steps:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='48%')
+    )
+    guidance_w = widgets.FloatSlider(
+        value=3.5, min=1.0, max=12.0, step=0.1,
+        description="Guidance/CFG:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='48%')
+    )
+    seed_w = widgets.IntText(
+        value=-1,
+        description="Seed (-1=rnd):",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='48%')
+    )
+    apply_lora_w = widgets.Checkbox(
+        value=True,
+        description="Apply LoRA",
+        layout=widgets.Layout(width='20%')
+    )
+    lora_file_w = widgets.Text(
+        value="nadeshiko_jats.safetensors",
+        placeholder="e.g. nadeshiko_jats:0.85, Japanese_Kimono:0.6",
+        description="LoRA File(s):",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='48%')
+    )
+    lora_strength_w = widgets.FloatSlider(
+        value=0.85, min=0.0, max=1.5, step=0.05,
+        description="Default Strength:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='30%')
+    )
+    upscale_w = widgets.Checkbox(
+        value=False,
+        description="2x AI Upscale (4x-UltraSharp 超解像拡大)",
+        layout=widgets.Layout(width='100%')
+    )
+    neg_prompt_w = widgets.Textarea(
+        value="ugly, deformed, blurry, low quality, artifacts, bad hands, cartoon, cgi",
+        placeholder="Negative prompt...",
+        description="Negative:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='98%', height='65px')
+    )
+
+    # Positive Prompt as expansive Textarea at the bottom
+    default_prompt = (
+        "A stunning cinematic portrait of a beautiful Japanese woman in cyberpunk Tokyo at night, "
+        "glowing neon lights, rain reflections, 8k resolution, highly detailed, masterwork photography"
+    )
+    pos_prompt_w = widgets.Textarea(
+        value=default_prompt,
+        placeholder="ここに長文プロンプトを入力（複数行・改行・コピペ対応）...",
+        description="Positive:",
+        style={'description_width': '110px'},
+        layout=widgets.Layout(width='98%', height='140px')
+    )
+
+    generate_btn = widgets.Button(
+        description="🎨 画像生成を実行 (Generate)",
+        button_style="success",
+        icon="play",
+        layout=widgets.Layout(width='98%', height='48px', margin='12px 0 12px 0')
+    )
+    output_area = widgets.Output()
+
+    def on_generate_clicked(b):
+        generate_btn.disabled = True
+        generate_btn.description = "⏳ 生成中 (Processing)..."
+        with output_area:
+            try:
+                run_generation_panel(
+                    engine=engine_w.value,
+                    prompt=pos_prompt_w.value,
+                    negative_prompt=neg_prompt_w.value,
+                    aspect_ratio_str=aspect_w.value,
+                    checkpoint=ckpt_w.value,
+                    batch_count=total_count_w.value,
+                    concurrent_batch_size=concurrent_w.value,
+                    apply_lora=apply_lora_w.value,
+                    lora_file=lora_file_w.value,
+                    lora_strength=lora_strength_w.value,
+                    sampler_name=sampler_w.value,
+                    scheduler=scheduler_w.value,
+                    upscale_2x=upscale_w.value,
+                    steps=steps_w.value,
+                    guidance_or_cfg=guidance_w.value,
+                    seed=seed_w.value
+                )
+            except Exception as e:
+                print(f"[ERROR] Generation failed: {e}")
+            finally:
+                generate_btn.disabled = False
+                generate_btn.description = "🎨 画像生成を実行 (Generate)"
+
+    generate_btn.on_click(on_generate_clicked)
+
+    # Layout Assembly
+    ui_box = widgets.VBox([
+        widgets.HTML("<h3>🎨 ComfyUI 画像生成 コントロールパネル</h3><p>パラメータを設定し、最下部のプロンプトを入力して生成ボタンを押してください。</p>"),
+        widgets.HBox([engine_w, ckpt_w]),
+        widgets.HBox([aspect_w, sampler_w]),
+        widgets.HBox([scheduler_w, steps_w]),
+        widgets.HBox([guidance_w, seed_w]),
+        widgets.HBox([total_count_w, concurrent_w]),
+        widgets.HBox([apply_lora_w, lora_file_w, lora_strength_w]),
+        widgets.HBox([upscale_w]),
+        widgets.HTML("<hr style='margin:10px 0;'>"),
+        neg_prompt_w,
+        widgets.HTML("<b>📝 Positive Prompt (最下部 Textarea・複数行入力):</b>"),
+        pos_prompt_w,
+        generate_btn,
+        output_area
+    ])
+    display(ui_box)
+
