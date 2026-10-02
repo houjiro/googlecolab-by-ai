@@ -330,6 +330,8 @@ def create_default_txt2img_workflow(
     height: int = 512,
     steps: int = 20,
     cfg: float = 7.0,
+    sampler_name: str = "euler_ancestral",
+    scheduler: str = "normal",
     seed: Optional[int] = None
 ) -> Dict[str, Any]:
     """Generates standard ComfyUI API prompt JSON for text-to-image (SD 1.5)."""
@@ -346,8 +348,8 @@ def create_default_txt2img_workflow(
                 "model": ["4", 0],
                 "negative": ["7", 0],
                 "positive": ["6", 0],
-                "sampler_name": "euler_ancestral",
-                "scheduler": "normal",
+                "sampler_name": sampler_name,
+                "scheduler": scheduler,
                 "seed": seed,
                 "steps": steps
             }
@@ -405,6 +407,8 @@ def create_sdxl_txt2img_workflow(
     height: int = 1024,
     steps: int = 30,
     cfg: float = 7.0,
+    sampler_name: str = "euler_ancestral",
+    scheduler: str = "normal",
     seed: Optional[int] = None
 ) -> Dict[str, Any]:
     """Generates standard ComfyUI API prompt JSON optimized for SDXL (1024x1024)."""
@@ -416,50 +420,118 @@ def create_sdxl_txt2img_workflow(
         height=height,
         steps=steps,
         cfg=cfg,
+        sampler_name=sampler_name,
+        scheduler=scheduler,
         seed=seed
     )
 
+def parse_multi_loras(lora_input: Optional[str], default_strength: float = 0.85) -> List[tuple]:
+    """
+    Parses comma-separated LoRA string into list of (filename, strength).
+    Supports format: 'lora1:0.8, lora2:0.5' or 'lora1, lora2'
+    """
+    if not lora_input or not str(lora_input).strip():
+        return []
+    
+    results = []
+    items = [x.strip() for x in str(lora_input).split(",") if x.strip()]
+    for item in items:
+        if ":" in item:
+            parts = item.split(":")
+            name = parts[0].strip()
+            try:
+                strength = float(parts[1].strip())
+            except ValueError:
+                strength = default_strength
+        else:
+            name = item.strip()
+            strength = default_strength
+        
+        if not name.endswith(".safetensors"):
+            name = f"{name}.safetensors"
+        results.append((name, strength))
+    return results
+
+def list_drive_models():
+    """Outputs clear list of all Checkpoints, FLUX models, LoRAs, and Upscalers on Google Drive."""
+    from inspect_loras import classify_lora
+    print("=========================================================================================")
+    print(f" 📂 Google Drive 読み込み済みモデル一覧 (場所: {DRIVE_MASTER_DIR})")
+    print("=========================================================================================")
+    
+    # 1. Checkpoints (SDXL)
+    ckpt_dir = DRIVE_MASTER_DIR / "models" / "checkpoints"
+    ckpts = sorted(list(ckpt_dir.rglob("*.safetensors")) + list(ckpt_dir.rglob("*.ckpt"))) if ckpt_dir.exists() else []
+    print(f"\n📦 Checkpoints (SDXL / models/checkpoints): {len(ckpts)} 件")
+    if ckpts:
+        for f in ckpts:
+            size_gb = f.stat().st_size / (1024*1024*1024)
+            print(f"  • {f.name:<40} ({size_gb:5.2f} GB)")
+    else:
+        print("  (なし)")
+
+    # 2. Diffusion Models (FLUX)
+    unet_dir = DRIVE_MASTER_DIR / "models" / "unet"
+    unets = sorted(list(unet_dir.rglob("*.safetensors"))) if unet_dir.exists() else []
+    print(f"\n⚡ Diffusion Models (FLUX本体 / models/unet): {len(unets)} 件")
+    if unets:
+        for f in unets:
+            size_gb = f.stat().st_size / (1024*1024*1024)
+            print(f"  • {f.name:<40} ({size_gb:5.2f} GB)")
+    else:
+        print("  (なし)")
+
+    # 3. LoRAs
+    lora_dir = DRIVE_MASTER_DIR / "models" / "loras"
+    loras = sorted(list(lora_dir.rglob("*.safetensors"))) if lora_dir.exists() else []
+    print(f"\n🎀 LoRAs (models/loras): {len(loras)} 件")
+    if loras:
+        for f in loras:
+            size_mb = f.stat().st_size / (1024*1024)
+            try:
+                diag = classify_lora(f)
+                badge = "🟢 [SDXL対応]" if diag.get("compatible_with_sdxl") else f"🔵 [{diag.get('architecture', 'FLUX/Other')}]"
+            except Exception:
+                badge = ""
+            print(f"  • {f.name:<38} ({size_mb:6.1f} MB) {badge}")
+    else:
+        print("  (なし)")
+
+    # 4. Upscalers
+    up_dir = DRIVE_MASTER_DIR / "models" / "upscale_models"
+    ups = sorted(list(up_dir.rglob("*.pth")) + list(up_dir.rglob("*.safetensors"))) if up_dir.exists() else []
+    print(f"\n🔍 Upscale Models (models/upscale_models): {len(ups)} 件")
+    if ups:
+        for f in ups:
+            size_mb = f.stat().st_size / (1024*1024)
+            print(f"  • {f.name:<40} ({size_mb:5.1f} MB)")
+    else:
+        print("  (なし)")
+    print("=========================================================================================\n")
+
 def create_sdxl_lora_workflow(
     ckpt_name: str,
-    lora_name: str,
-    positive_prompt: str,
+    lora_name: Optional[str] = None,
+    positive_prompt: str = "",
     negative_prompt: str = "ugly, blurry, low quality, artifacts, distorted, bad anatomy, watermark",
     lora_strength: float = 0.85,
     width: int = 1344,
     height: int = 768,
     steps: int = 30,
     cfg: float = 7.0,
+    sampler_name: str = "euler_ancestral",
+    scheduler: str = "normal",
     batch_size: int = 1,
     seed: Optional[int] = None
 ) -> Dict[str, Any]:
-    """Generates ComfyUI API prompt JSON for SDXL with LoRA support (defaults to 16:9)."""
+    """Generates ComfyUI API prompt JSON for SDXL with Multi-LoRA support."""
     if seed is None:
         seed = int(time.time() * 1000) % 10000000000
 
-    if not lora_name.endswith(".safetensors"):
-        lora_name = f"{lora_name}.safetensors"
-
     workflow = {
-        "3": {
-            "class_type": "KSampler",
-            "inputs": {
-                "cfg": cfg,
-                "denoise": 1.0,
-                "latent_image": ["5", 0],
-                "model": ["10", 0],
-                "negative": ["7", 0],
-                "positive": ["6", 0],
-                "sampler_name": "euler_ancestral",
-                "scheduler": "normal",
-                "seed": seed,
-                "steps": steps
-            }
-        },
         "4": {
             "class_type": "CheckpointLoaderSimple",
-            "inputs": {
-                "ckpt_name": ckpt_name
-            }
+            "inputs": {"ckpt_name": ckpt_name}
         },
         "5": {
             "class_type": "EmptyLatentImage",
@@ -468,45 +540,61 @@ def create_sdxl_lora_workflow(
                 "height": height,
                 "width": width
             }
-        },
-        "10": {
+        }
+    }
+
+    # Handle Multi-LoRA Chaining
+    model_source = ["4", 0]
+    clip_source = ["4", 1]
+    
+    lora_list = parse_multi_loras(lora_name, lora_strength)
+    node_id = 100
+    for l_fname, l_str in lora_list:
+        cur_id = str(node_id)
+        workflow[cur_id] = {
             "class_type": "LoraLoader",
             "inputs": {
-                "lora_name": lora_name,
-                "strength_model": lora_strength,
-                "strength_clip": lora_strength,
-                "model": ["4", 0],
-                "clip": ["4", 1]
-            }
-        },
-        "6": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {
-                "clip": ["10", 1],
-                "text": positive_prompt
-            }
-        },
-        "7": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {
-                "clip": ["10", 1],
-                "text": negative_prompt
-            }
-        },
-        "8": {
-            "class_type": "VAEDecode",
-            "inputs": {
-                "samples": ["3", 0],
-                "vae": ["4", 2]
-            }
-        },
-        "9": {
-            "class_type": "SaveImage",
-            "inputs": {
-                "filename_prefix": "ComfyUI_Master",
-                "images": ["8", 0]
+                "lora_name": l_fname,
+                "strength_model": l_str,
+                "strength_clip": l_str,
+                "model": model_source,
+                "clip": clip_source
             }
         }
+        model_source = [cur_id, 0]
+        clip_source = [cur_id, 1]
+        node_id += 1
+
+    workflow["6"] = {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"clip": clip_source, "text": positive_prompt}
+    }
+    workflow["7"] = {
+        "class_type": "CLIPTextEncode",
+        "inputs": {"clip": clip_source, "text": negative_prompt}
+    }
+    workflow["3"] = {
+        "class_type": "KSampler",
+        "inputs": {
+            "cfg": cfg,
+            "denoise": 1.0,
+            "latent_image": ["5", 0],
+            "model": model_source,
+            "positive": ["6", 0],
+            "negative": ["7", 0],
+            "sampler_name": sampler_name,
+            "scheduler": scheduler,
+            "seed": seed,
+            "steps": steps
+        }
+    }
+    workflow["8"] = {
+        "class_type": "VAEDecode",
+        "inputs": {"samples": ["3", 0], "vae": ["4", 2]}
+    }
+    workflow["9"] = {
+        "class_type": "SaveImage",
+        "inputs": {"filename_prefix": "ComfyUI_Master", "images": ["8", 0]}
     }
     return workflow
 
@@ -522,85 +610,64 @@ def create_flux_workflow(
     height: int = 768,
     steps: int = 25,
     guidance: float = 3.5,
+    sampler_name: str = "euler",
+    scheduler: str = "simple",
     batch_size: int = 1,
     seed: Optional[int] = None
 ) -> Dict[str, Any]:
-    """
-    Generates ComfyUI API prompt JSON for FLUX.1 [dev] with optional LoRA support.
-    Defaults to 16:9 (1344x768).
-    """
+    """Generates ComfyUI API prompt JSON for FLUX.1 [dev] with Multi-LoRA support."""
     if seed is None:
         seed = int(time.time() * 1000) % 10000000000
 
     workflow = {
         "1": {
             "class_type": "UNETLoader",
-            "inputs": {
-                "unet_name": unet_name,
-                "weight_dtype": "default"
-            }
+            "inputs": {"unet_name": unet_name, "weight_dtype": "default"}
         },
         "2": {
             "class_type": "DualCLIPLoader",
-            "inputs": {
-                "clip_name1": clip_name1,
-                "clip_name2": clip_name2,
-                "type": "flux"
-            }
+            "inputs": {"clip_name1": clip_name1, "clip_name2": clip_name2, "type": "flux"}
         },
         "3": {
             "class_type": "VAELoader",
-            "inputs": {
-                "vae_name": vae_name
-            }
+            "inputs": {"vae_name": vae_name}
         },
         "5": {
             "class_type": "EmptyLatentImage",
-            "inputs": {
-                "batch_size": batch_size,
-                "height": height,
-                "width": width
-            }
+            "inputs": {"batch_size": batch_size, "height": height, "width": width}
         }
     }
 
-    # Handle LoRA injection if specified
+    # Handle Multi-LoRA Chaining for FLUX
     model_source = ["1", 0]
     clip_source = ["2", 0]
 
-    if lora_name:
-        if not lora_name.endswith(".safetensors"):
-            lora_name = f"{lora_name}.safetensors"
-        workflow["10"] = {
+    lora_list = parse_multi_loras(lora_name, lora_strength)
+    node_id = 100
+    for l_fname, l_str in lora_list:
+        cur_id = str(node_id)
+        workflow[cur_id] = {
             "class_type": "LoraLoader",
             "inputs": {
-                "lora_name": lora_name,
-                "strength_model": lora_strength,
-                "strength_clip": lora_strength,
+                "lora_name": l_fname,
+                "strength_model": l_str,
+                "strength_clip": l_str,
                 "model": model_source,
                 "clip": clip_source
             }
         }
-        model_source = ["10", 0]
-        clip_source = ["10", 1]
+        model_source = [cur_id, 0]
+        clip_source = [cur_id, 1]
+        node_id += 1
 
-    # Conditioning (Text Encode + Flux Guidance)
     workflow["6"] = {
         "class_type": "CLIPTextEncode",
-        "inputs": {
-            "clip": clip_source,
-            "text": positive_prompt
-        }
+        "inputs": {"clip": clip_source, "text": positive_prompt}
     }
     workflow["7"] = {
         "class_type": "FluxGuidance",
-        "inputs": {
-            "guidance": guidance,
-            "conditioning": ["6", 0]
-        }
+        "inputs": {"guidance": guidance, "conditioning": ["6", 0]}
     }
-
-    # KSampler (FLUX uses cfg=1.0 and Euler / Simple)
     workflow["8"] = {
         "class_type": "KSampler",
         "inputs": {
@@ -610,29 +677,20 @@ def create_flux_workflow(
             "model": model_source,
             "positive": ["7", 0],
             "negative": ["6", 0],
-            "sampler_name": "euler",
-            "scheduler": "simple",
+            "sampler_name": sampler_name,
+            "scheduler": scheduler,
             "seed": seed,
             "steps": steps
         }
     }
-
-    # Decode and Save
     workflow["9"] = {
         "class_type": "VAEDecode",
-        "inputs": {
-            "samples": ["8", 0],
-            "vae": ["3", 0]
-        }
+        "inputs": {"samples": ["8", 0], "vae": ["3", 0]}
     }
     workflow["11"] = {
         "class_type": "SaveImage",
-        "inputs": {
-            "filename_prefix": "FLUX_Master",
-            "images": ["9", 0]
-        }
+        "inputs": {"filename_prefix": "FLUX_Master", "images": ["9", 0]}
     }
-
     return workflow
 
 def run_generation_panel(
@@ -645,6 +703,8 @@ def run_generation_panel(
     apply_lora: bool = False,
     lora_file: str = "",
     lora_strength: float = 0.85,
+    sampler_name: str = "euler",
+    scheduler: str = "simple",
     upscale_2x: bool = False,
     steps: int = 25,
     guidance_or_cfg: float = 3.5,
@@ -661,13 +721,10 @@ def run_generation_panel(
     }
     width, height = res_map.get(aspect_ratio_str, (1024, 1024))
     
-    # Resolve LoRA
+    # Resolve LoRA (support single or comma-separated multi-LoRA)
     active_lora = None
     if apply_lora and lora_file.strip():
-        lora_name = lora_file.strip()
-        if not lora_name.endswith(".safetensors"):
-            lora_name = f"{lora_name}.safetensors"
-        active_lora = lora_name
+        active_lora = lora_file.strip()
 
     # Handle Upscaler Model check
     upscaler_file = "4x-UltraSharp.pth"
@@ -687,8 +744,11 @@ def run_generation_panel(
     print(f"\n=======================================================")
     print(f" 🎨 生成開始: 【{engine}】 | 解像度: {width}x{height} (2x拡大: {'ON (2688x1536)' if upscale_2x else 'OFF'})")
     print(f" 🔢 生成枚数: {batch_count} 枚 (同時バッチ: {concurrent_batch_size})")
+    print(f" ⚙️ Sampler: {sampler_name} | Scheduler: {scheduler} | Steps: {steps}")
     if active_lora:
-        print(f" 🎀 適用LoRA: {active_lora} (強度: {lora_strength})")
+        parsed_loras = parse_multi_loras(active_lora, lora_strength)
+        lora_desc = ", ".join([f"{n} (強度:{s})" for n, s in parsed_loras])
+        print(f" 🎀 適用LoRA: {lora_desc}")
     print(f"=======================================================")
 
     for i in range(1, batch_count + 1):
@@ -704,6 +764,8 @@ def run_generation_panel(
                 height=height,
                 steps=steps,
                 guidance=guidance_or_cfg,
+                sampler_name=sampler_name,
+                scheduler=scheduler,
                 batch_size=concurrent_batch_size,
                 seed=cur_seed
             )
@@ -734,6 +796,8 @@ def run_generation_panel(
                     height=height,
                     steps=steps,
                     cfg=guidance_or_cfg,
+                    sampler_name=sampler_name,
+                    scheduler=scheduler,
                     batch_size=concurrent_batch_size,
                     seed=cur_seed
                 )
@@ -746,6 +810,8 @@ def run_generation_panel(
                     height=height,
                     steps=steps,
                     cfg=guidance_or_cfg,
+                    sampler_name=sampler_name,
+                    scheduler=scheduler,
                     seed=cur_seed
                 )
                 wf["5"]["inputs"]["batch_size"] = concurrent_batch_size
